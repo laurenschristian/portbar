@@ -18,11 +18,13 @@ public struct Listener: Equatable {
 }
 
 public enum Inventory {
-    public static func scan(containers: [UInt16: Container] = [:]) -> [Listener] {
-        let sockets = Scanner.sockets()
+    public static func scan(containers: [UInt16: Container] = [:]) -> [Listener] { snapshot(containers: containers).listeners }
+
+    public static func snapshot(containers: [UInt16: Container] = [:]) -> (listeners: [Listener], active: Set<UInt16>) {
+        let (sockets, active) = Scanner.scan()
         var procs: [pid_t: Proc] = [:]
         for pid in Set(sockets.map(\.pid)) { procs[pid] = Scanner.proc(pid) }
-        return build(sockets, procs: procs, containers: containers)
+        return (build(sockets, procs: procs, containers: containers), active)
     }
 
     /// True when a Docker engine owns a listening port, so `docker ps` is worth the 100 ms.

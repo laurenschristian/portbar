@@ -39,6 +39,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp Info.plist "$APP/Contents/"
 [ -f Resources/AppIcon.icns ] && cp Resources/AppIcon.icns "$APP/Contents/Resources/"
+cp -R Resources/icons "$APP/Contents/Resources/"
 for arch in arm64 x86_64; do
   swiftc -Osize -whole-module-optimization -module-name PortBar -target "$arch-apple-macos13.0" \
     Sources/PortCore/*.swift Sources/PortBar/*.swift -o "build/PortBar-$arch"

@@ -7,6 +7,7 @@ enum CLI {
            portbar <port>                 details for one port
            portbar kill <port>... [--force]
            portbar kill --all-dev [-y]    stop every dev server
+           portbar kill --idle [-y]       stop dev servers idle past the auto-stop threshold
            portbar help
     """
 
@@ -18,14 +19,18 @@ enum CLI {
         let words = argv.filter { !$0.hasPrefix("-") }
         if flags.contains("-h") || flags.contains("--help") || words.first == "help" { print(usage); return 0 }
         let listeners = scan()
+        let activity = Activity()
 
         if words.first == "kill" {
             var targets: [Listener]
-            if flags.contains("--all-dev") {
-                targets = listeners.filter { !$0.isSystem }
-                guard !targets.isEmpty else { print("no dev servers running"); return 0 }
+            if flags.contains("--all-dev") || flags.contains("--idle") {
+                let hours = activity.thresholdHours > 0 ? activity.thresholdHours : 8
+                targets = flags.contains("--idle")
+                    ? listeners.filter { Activity.stoppable($0) && (activity.idle($0) ?? 0) >= hours * 3600 }
+                    : listeners.filter(Activity.stoppable)
+                guard !targets.isEmpty else { print(flags.contains("--idle") ? "nothing idle for \(Int(hours))h" : "no dev servers running"); return 0 }
                 if !flags.contains("-y") {
-                    targets.forEach { print(row($0)) }
+                    targets.forEach { print(row($0, activity)) }
                     print("stop these \(targets.count)? [y/N] ", terminator: "")
                     guard readLine()?.lowercased().hasPrefix("y") == true else { return 1 }
                 }
@@ -60,14 +65,15 @@ enum CLI {
             guard let l = listeners.first(where: { $0.port == p }) else { fputs("nothing listening on :\(p)\n", stderr); return 1 }
             if flags.contains("--json") { return json([l]) }
             detail(l)
+            print(style(pad("idle", 11), "2") + idle(l, activity))
             return 0
         }
 
         let shown = flags.contains("--all") || flags.contains("-a") ? listeners : listeners.filter { !$0.isSystem }
         if flags.contains("--json") { return json(shown) }
         guard !shown.isEmpty else { print("no dev servers listening"); return 0 }
-        print(style(pad("PORT", 6) + pad("STACK", 16) + pad("PROJECT", 44) + pad("PID", 8) + pad("UP", 6) + "BIND", "2"))
-        shown.forEach { print(row($0)) }
+        print(style(pad("PORT", 6) + pad("STACK", 16) + pad("PROJECT", 44) + pad("PID", 8) + pad("UP", 6) + pad("IDLE", 7) + "BIND", "2"))
+        shown.forEach { print(row($0, activity)) }
         let hidden = listeners.count - shown.count
         if hidden > 0 { print(style("\(hidden) system ports hidden; --all shows them", "2")) }
         return 0
@@ -77,11 +83,17 @@ enum CLI {
         Inventory.scan(containers: Inventory.needsDocker() ? Docker.containers() : [:])
     }
 
-    static func row(_ l: Listener) -> String {
+    static func row(_ l: Listener, _ activity: Activity) -> String {
         let port = style(pad(String(l.port), 6), "1")
         let project = l.project.map { pad(String($0.prefix(42)), 44) } ?? pad("", 44)
-        let line = port + pad(l.stack, 16) + project + pad(String(l.main.pid), 8) + pad(uptime(since: l.main.started), 6) + l.bind
+        let line = port + pad(l.stack, 16) + project + pad(String(l.main.pid), 8) + pad(uptime(since: l.main.started), 6) + pad(idle(l, activity), 7) + l.bind
         return l.isSystem ? style(line, "2") : line
+    }
+
+    static func idle(_ l: Listener, _ activity: Activity) -> String {
+        guard Activity.stoppable(l) else { return l.isSystem ? "" : "keep" }
+        guard let t = activity.idle(l) else { return "?" }
+        return t < 60 ? "now" : uptime(since: Date().addingTimeInterval(-t))
     }
 
     static func detail(_ l: Listener) {

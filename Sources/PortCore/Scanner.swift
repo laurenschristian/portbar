@@ -38,8 +38,12 @@ public struct Proc: Equatable {
 
 /// Reads sockets and process details straight from libproc. Only processes of the current user are visible.
 public enum Scanner {
-    public static func sockets() -> [Socket] {
+    public static func sockets() -> [Socket] { scan().listening }
+
+    /// Listening sockets, plus local ports that currently hold an established connection.
+    public static func scan() -> (listening: [Socket], active: Set<UInt16>) {
         var result: [Socket] = []
+        var active: Set<UInt16> = []
         for pid in allPids() {
             let size = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
             guard size > 0 else { continue }
@@ -49,15 +53,32 @@ public enum Scanner {
             for fd in fds.prefix(Int(got) / MemoryLayout<proc_fdinfo>.stride) where fd.proc_fdtype == PROX_FDTYPE_SOCKET {
                 var info = socket_fdinfo()
                 guard proc_pidfdinfo(pid, fd.proc_fd, PROC_PIDFDSOCKETINFO, &info, Int32(MemoryLayout<socket_fdinfo>.size)) > 0,
-                      info.psi.soi_kind == SOCKINFO_TCP,
-                      info.psi.soi_proto.pri_tcp.tcpsi_state == TSI_S_LISTEN else { continue }
+                      info.psi.soi_kind == SOCKINFO_TCP else { continue }
                 let ini = info.psi.soi_proto.pri_tcp.tcpsi_ini
                 let port = UInt16(bigEndian: UInt16(truncatingIfNeeded: ini.insi_lport))
-                result.append(Socket(pid: pid, port: port, address: address(ini)))
+                switch info.psi.soi_proto.pri_tcp.tcpsi_state {
+                case TSI_S_LISTEN: result.append(Socket(pid: pid, port: port, address: address(ini)))
+                case TSI_S_ESTABLISHED: active.insert(port)
+                default: break
+                }
             }
         }
-        return result
+        return (result, active)
     }
+
+    /// Total user + system CPU time in seconds.
+    public static func cpu(_ pid: pid_t) -> Double? {
+        var task = proc_taskinfo()
+        guard proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &task, Int32(MemoryLayout<proc_taskinfo>.size)) > 0 else { return nil }
+        return Double(task.pti_total_user + task.pti_total_system) * timebase / 1e9
+    }
+
+    // pti_total_* are mach absolute time units, not nanoseconds, on Apple Silicon.
+    private static let timebase: Double = {
+        var info = mach_timebase_info_data_t()
+        mach_timebase_info(&info)
+        return Double(info.numer) / Double(info.denom)
+    }()
 
     public static func proc(_ pid: pid_t) -> Proc? {
         var bsd = proc_bsdinfo()

@@ -125,3 +125,42 @@ final class InventoryTests: XCTestCase {
         XCTAssertEqual(uptime(since: now.addingTimeInterval(-200_000), now: now), "2d")
     }
 }
+
+final class ActivityTests: XCTestCase {
+    private func listener(_ port: UInt16, stack: String = "Vite", pid: pid_t = 50) -> Listener {
+        Listener(port: port, addresses: ["127.0.0.1"], procs: [proc("/usr/local/bin/node", ["node"], pid: pid)],
+                 stack: stack, project: nil, isSystem: false, container: nil)
+    }
+
+    func testIdleClock() {
+        let store = UserDefaults(suiteName: "portbar-test-\(UUID().uuidString)")!
+        let a = Activity(store: store)
+        let vite = listener(5173), db = listener(5432, stack: "Postgres", pid: 60)
+        let t0 = Date()
+        var cpu: [pid_t: Double] = [50: 1.0, 60: 1.0]
+        a.update([vite, db], active: [], cpu: { cpu[$0] }, now: t0)
+        a.update([vite, db], active: [], cpu: { cpu[$0] }, now: t0.addingTimeInterval(9 * 3600))
+        XCTAssertEqual(a.idle(vite, now: t0.addingTimeInterval(9 * 3600)), 9 * 3600)
+        XCTAssertEqual(a.expired([vite, db], now: t0.addingTimeInterval(9 * 3600)).map(\.port), [5173])
+
+        cpu[50] = 1.5
+        a.update([vite], active: [], cpu: { cpu[$0] }, now: t0.addingTimeInterval(10 * 3600))
+        XCTAssertEqual(a.idle(vite, now: t0.addingTimeInterval(10 * 3600)), 0)
+
+        a.update([vite], active: [5173], cpu: { cpu[$0] }, now: t0.addingTimeInterval(20 * 3600))
+        XCTAssertEqual(a.idle(vite, now: t0.addingTimeInterval(20 * 3600)), 0)
+
+        let pg = Listener(port: 5433, addresses: ["::"], procs: [proc("/x/com.docker.backend", [], pid: 70)], stack: "Docker", project: nil,
+                          isSystem: false, container: Container(id: "a", name: "db", image: "postgres:16", project: nil))
+        let web = Listener(port: 8080, addresses: ["::"], procs: pg.procs, stack: "Docker", project: nil,
+                           isSystem: false, container: Container(id: "b", name: "web", image: "nginx", project: nil))
+        XCTAssertFalse(Activity.stoppable(pg))
+        XCTAssertFalse(Activity.stoppable(web))
+        XCTAssertTrue(Activity.isService(web))
+
+        // A second instance reads what the first one stored.
+        XCTAssertNotNil(Activity(store: store).idle(vite))
+        a.thresholdHours = 0
+        XCTAssertTrue(a.expired([vite], now: t0.addingTimeInterval(99 * 3600)).isEmpty)
+    }
+}

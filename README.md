@@ -15,10 +15,6 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/laurenschristian/portbar" alt="MIT License"></a>
 </p>
 
-<p align="center">
-  <img src="docs/menu.png" width="640" alt="PortBar menu with dev servers and pinned services">
-</p>
-
 ## Overview
 
 If you run several dev servers and Docker side by side, ports pile up. You lose track of which server from last week still holds port 8000, or which worktree a Vite server belongs to.

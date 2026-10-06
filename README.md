@@ -54,7 +54,7 @@ It is plain AppKit with no dependencies, no analytics and no network access.
 
 Measured on macOS 26, Apple Silicon:
 
-| Metric | PortBar 1.1 |
+| Metric | PortBar 1.1.1 |
 | --- | --- |
 | Memory footprint | 26 MB |
 | Idle CPU | 0.0% |

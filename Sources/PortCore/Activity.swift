@@ -55,6 +55,7 @@ public final class Activity {
 
     public func expired(_ listeners: [Listener], now: Date = Date()) -> [Listener] {
         guard thresholdHours > 0 else { return [] }
-        return listeners.filter { Self.stoppable($0) && (idle($0, now: now) ?? 0) >= thresholdHours * 3600 }
+        // Orphans go at once: their worktree is gone, so nobody can be using them.
+        return listeners.filter { Self.stoppable($0) && ($0.orphan || (idle($0, now: now) ?? 0) >= thresholdHours * 3600) }
     }
 }

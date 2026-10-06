@@ -19,15 +19,18 @@ public struct Proc: Equatable {
     public let uid: uid_t
     public let exe: String
     public let args: [String]
+    public let env: [String]
     public let cwd: String?
     public let started: Date?
 
-    public init(pid: pid_t, ppid: pid_t = 1, uid: uid_t = getuid(), exe: String, args: [String], cwd: String? = nil, started: Date? = nil) {
+    public init(pid: pid_t, ppid: pid_t = 1, uid: uid_t = getuid(), exe: String, args: [String], env: [String] = [],
+                cwd: String? = nil, started: Date? = nil) {
         self.pid = pid
         self.ppid = ppid
         self.uid = uid
         self.exe = exe
         self.args = args
+        self.env = env
         self.cwd = cwd
         self.started = started
     }
@@ -91,7 +94,8 @@ public enum Scanner {
             cwd = withUnsafeBytes(of: vnode.pvi_cdir.vip_path) { String(cString: $0.bindMemory(to: CChar.self).baseAddress!) }
         }
         let started = Date(timeIntervalSince1970: TimeInterval(bsd.pbi_start_tvsec) + TimeInterval(bsd.pbi_start_tvusec) / 1e6)
-        return Proc(pid: pid, ppid: pid_t(bsd.pbi_ppid), uid: bsd.pbi_uid, exe: exe, args: args(pid),
+        let (args, env) = arguments(pid)
+        return Proc(pid: pid, ppid: pid_t(bsd.pbi_ppid), uid: bsd.pbi_uid, exe: exe, args: args, env: env,
                     cwd: cwd?.isEmpty == false ? cwd : nil, started: started)
     }
 
@@ -109,25 +113,47 @@ public enum Scanner {
         return pids.prefix(Int(max(got, 0))).filter { $0 > 0 }
     }
 
-    // KERN_PROCARGS2 layout: argc (Int32), exec path, NUL padding, then argc NUL-terminated strings.
-    private static func args(_ pid: pid_t) -> [String] {
+    /// Physical footprint in bytes, the number Activity Monitor shows as Memory.
+    public static func memory(_ pid: pid_t) -> UInt64? {
+        var info = rusage_info_v4()
+        let ok = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { proc_pid_rusage(pid, RUSAGE_INFO_V4, $0) }
+        }
+        return ok == 0 ? info.ri_phys_footprint : nil
+    }
+
+    /// pid to parent pid for every visible process.
+    public static func parents() -> [pid_t: pid_t] {
+        var map: [pid_t: pid_t] = [:]
+        for pid in allPids() {
+            var bsd = proc_bsdinfo()
+            if proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &bsd, Int32(MemoryLayout<proc_bsdinfo>.size)) > 0 { map[pid] = pid_t(bsd.pbi_ppid) }
+        }
+        return map
+    }
+
+    // KERN_PROCARGS2 layout: argc (Int32), exec path, NUL padding, argc strings, then the environment.
+    private static func arguments(_ pid: pid_t) -> ([String], [String]) {
         var mib = [CTL_KERN, KERN_PROCARGS2, pid]
         var size = 0
-        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 4 else { return [] }
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 4 else { return ([], []) }
         var buf = [UInt8](repeating: 0, count: size)
-        guard sysctl(&mib, 3, &buf, &size, nil, 0) == 0, size > 4 else { return [] }
+        guard sysctl(&mib, 3, &buf, &size, nil, 0) == 0, size > 4 else { return ([], []) }
         let argc = buf.withUnsafeBytes { $0.load(as: Int32.self) }
         var i = 4
         while i < size, buf[i] != 0 { i += 1 }
         while i < size, buf[i] == 0 { i += 1 }
         var out: [String] = []
-        while out.count < argc, i < size {
+        var env: [String] = []
+        while i < size {
             let start = i
             while i < size, buf[i] != 0 { i += 1 }
-            out.append(String(decoding: buf[start..<i], as: UTF8.self))
+            if i == start && out.count >= argc { break }
+            let s = String(decoding: buf[start..<i], as: UTF8.self)
+            if out.count < argc { out.append(s) } else { env.append(s) }
             i += 1
         }
-        return out
+        return (out, env)
     }
 
     private static func address(_ ini: in_sockinfo) -> String {

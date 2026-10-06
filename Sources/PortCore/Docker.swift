@@ -28,6 +28,11 @@ public enum Docker {
         return run(docker, ["stop", c.id], timeout: 30) != nil
     }
 
+    public static func restart(_ c: Container) -> Bool {
+        guard let docker = binary else { return false }
+        return run(docker, ["restart", c.id], timeout: 60) != nil
+    }
+
     public static func parse(_ out: String) -> [UInt16: Container] {
         var map: [UInt16: Container] = [:]
         for line in out.split(separator: "\n") {

@@ -164,3 +164,43 @@ final class ActivityTests: XCTestCase {
         XCTAssertTrue(a.expired([vite], now: t0.addingTimeInterval(99 * 3600)).isEmpty)
     }
 }
+
+final class LauncherTests: XCTestCase {
+    func testOrphanAndMemoryFormat() {
+        let gone = proc("/usr/local/bin/node", ["node", "vite.js"], pid: 30, cwd: "/tmp/portbar-missing-\(UUID().uuidString)")
+        let l = Inventory.build([Socket(pid: 30, port: 5173, address: "127.0.0.1")], procs: [30: gone], containers: [:])
+        XCTAssertTrue(l[0].orphan)
+        XCTAssertEqual(megabytes(412 * 1_048_576), "412 MB")
+        XCTAssertEqual(megabytes(3 * 1_073_741_824 / 2), "1.5 GB")
+        XCTAssertEqual(megabytes(nil), "")
+    }
+
+    func testLaravelLog() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pb-\(UUID().uuidString)").path
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        try FileManager.default.createDirectory(atPath: root + "/storage/logs", withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(atPath: root + "/public", withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: root + "/artisan", contents: nil)
+        FileManager.default.createFile(atPath: root + "/storage/logs/laravel-old.log", contents: nil,
+                                       attributes: [.modificationDate: Date.distantPast])
+        FileManager.default.createFile(atPath: root + "/storage/logs/laravel.log", contents: nil)
+        XCTAssertEqual(Launcher.laravelLog(cwd: root + "/public"), root + "/storage/logs/laravel.log")
+        XCTAssertNil(Launcher.laravelLog(cwd: "/tmp"))
+    }
+
+    func testRestartRunsSameCommandAgain() throws {
+        let port = UInt16.random(in: 40000...49000)
+        let dir = FileManager.default.temporaryDirectory.path
+        let python = "/usr/bin/python3"
+        XCTAssertTrue(Launcher.spawn(python, [python, "-m", "http.server", String(port), "--bind", "127.0.0.1"], cwd: dir,
+                                     env: ["PATH=/usr/bin:/bin"], log: Launcher.logs + "/test.log"))
+        var first: Listener?
+        for _ in 0..<40 where first == nil { usleep(250_000); first = Inventory.scan().first { $0.port == port } }
+        let l = try XCTUnwrap(first)
+        XCTAssertNil(Launcher.restart(l))
+        let second = try XCTUnwrap(Inventory.scan().first { $0.port == port })
+        XCTAssertNotEqual(second.main.pid, l.main.pid)
+        XCTAssertEqual(second.main.args, l.main.args)
+        XCTAssertTrue(Killer.stop(second).isEmpty)
+    }
+}

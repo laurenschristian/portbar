@@ -204,3 +204,26 @@ final class LauncherTests: XCTestCase {
         XCTAssertTrue(Killer.stop(second).isEmpty)
     }
 }
+
+final class PortsTests: XCTestCase {
+    func testDockerStatsParse() {
+        let s = Docker.parseStats("abc\t512.5MiB / 7.6GiB\t3.25%\ndef\t1.5GiB / 7.6GiB\t0.00%\n")
+        XCTAssertEqual(s["abc"]?.memory, UInt64(512.5 * 1_048_576))
+        XCTAssertEqual(s["abc"]?.cpu, 3.25)
+        XCTAssertEqual(s["def"]?.memory, UInt64(1.5 * 1_073_741_824))
+    }
+
+    func testNextFreeSkipsListeningPorts() {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        defer { close(fd) }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        _ = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(fd, $0, len) } }
+        listen(fd, 1)
+        withUnsafeMutablePointer(to: &addr) { _ = $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &len) } }
+        let taken = UInt16(bigEndian: addr.sin_port)
+        XCTAssertFalse(Ports.bindable(taken))
+        XCTAssertNotEqual(Ports.nextFree(from: taken), taken)
+    }
+}

@@ -11,6 +11,13 @@ final class PortBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let work = DispatchQueue(label: "portbar.scan", qos: .userInitiated)
     private var listeners: [Listener] = []
     private var containers: [UInt16: Container] = [:]
+    private var stats: [String: (memory: UInt64, cpu: Double)] = [:]
+    private var watchers: [String: DispatchSourceFileSystemObject] = [:]
+    private var memoryAlerted: Set<String> = []
+    private var memoryLimitGB: Double {
+        get { defaults.object(forKey: "memoryLimitGB") as? Double ?? 3 }
+        set { defaults.set(newValue, forKey: "memoryLimitGB") }
+    }
     private var dockerAt = Date.distantPast
     private var timer: DispatchSourceTimer?
     private let activity = Activity()
@@ -51,31 +58,78 @@ final class PortBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func refresh(docker force: Bool, then: (() -> Void)? = nil) {
         work.async { [self] in
             if force || Date().timeIntervalSince(dockerAt) > 120 {
-                let next = Inventory.needsDocker() ? Docker.containers() : [:]
-                DispatchQueue.main.sync { containers = next }
+                let docker = Inventory.needsDocker()
+                let next = docker ? Docker.containers() : [:]
+                let nextStats = docker && !next.isEmpty ? Docker.stats() : [:]
+                DispatchQueue.main.sync { containers = next; stats = nextStats }
                 dockerAt = Date()
             }
-            var (found, active) = Inventory.snapshot(containers: DispatchQueue.main.sync { containers })
+            let cached = DispatchQueue.main.sync { (containers, stats) }
+            var (found, active) = Inventory.snapshot(containers: cached.0, stats: cached.1)
             activity.update(found, active: active)
             let expired = activity.expired(found)
             for l in expired where Killer.stop(l).isEmpty {
                 let why = l.orphan ? "its folder was deleted" : "it was idle for \(span(activity.idle(l) ?? 0))"
                 notify("Stopped :\(l.port) \(l.stack)", "\(l.project ?? l.main.name): \(why).")
             }
-            if !expired.isEmpty { (found, active) = Inventory.snapshot(containers: DispatchQueue.main.sync { containers }) }
+            if !expired.isEmpty { (found, active) = Inventory.snapshot(containers: cached.0, stats: cached.1) }
             DispatchQueue.main.async { [self] in
-                listeners = found
-                let count = found.filter(Activity.stoppable).count
-                status.button?.title = count > 0 ? " \(count)" : ""
+                apply(found)
+                checkMemory(found)
+                watch(found)
                 then?()
             }
         }
     }
 
-    func menuWillOpen(_ menu: NSMenu) {
-        // Draw from the last scan at once, then redraw with fresh data (tracked menus update in place).
+    private func apply(_ found: [Listener]) {
+        listeners = found
+        let count = found.filter(Activity.stoppable).count
+        status.button?.title = count > 0 ? " \(count)" : ""
+    }
+
+    // A menu resized while open keeps its old height, so scan before it opens (about 10 ms) and never rebuild it while open.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        apply(Inventory.snapshot(containers: containers, stats: stats).listeners)
         build()
-        refresh(docker: true) { [weak self] in self?.build() }
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        refresh(docker: true)
+    }
+
+    /// Notifies once per server when a dev server passes the memory limit; re-arms when it drops below.
+    private func checkMemory(_ found: [Listener]) {
+        guard memoryLimitGB > 0 else { return }
+        let limit = UInt64(memoryLimitGB * 1_073_741_824)
+        for l in found where Activity.stoppable(l) {
+            let key = "\(l.port)-\(l.main.pid)"
+            if (l.memory ?? 0) >= limit {
+                if memoryAlerted.insert(key).inserted {
+                    notify(":\(l.port) \(l.stack) uses \(megabytes(l.memory))", "\(l.project ?? l.main.name). Restart or stop it from PortBar.")
+                }
+            } else {
+                memoryAlerted.remove(key)
+            }
+        }
+    }
+
+    /// Watches each dev server's folder, so deleting a worktree stops its servers at once instead of on the next scan.
+    private func watch(_ found: [Listener]) {
+        let dirs = Set(found.filter { Activity.stoppable($0) && !$0.orphan }.compactMap(\.cwd))
+        for (dir, source) in watchers where !dirs.contains(dir) {
+            source.cancel()
+            watchers[dir] = nil
+        }
+        for dir in dirs where watchers[dir] == nil {
+            let fd = open(dir, O_EVTONLY)
+            guard fd >= 0 else { continue }
+            let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.delete, .rename], queue: .main)
+            source.setEventHandler { [weak self] in self?.refresh(docker: false) }
+            source.setCancelHandler { close(fd) }
+            source.resume()
+            watchers[dir] = source
+        }
     }
 
     // MARK: Menu
@@ -113,6 +167,13 @@ final class PortBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let autoItem = NSMenuItem(title: "Auto-Stop Idle Servers", action: nil, keyEquivalent: "")
         autoItem.submenu = auto
         menu.addItem(autoItem)
+        let memory = NSMenu()
+        for (title, gb) in [("Off", 0.0), ("Above 2 GB", 2), ("Above 3 GB", 3), ("Above 4 GB", 4), ("Above 8 GB", 8)] {
+            memory.addItem(item(title, on: memoryLimitGB == gb) { $0.memoryLimitGB = gb; $0.memoryAlerted = [] })
+        }
+        let memoryItem = NSMenuItem(title: "Memory Alerts", action: nil, keyEquivalent: "")
+        memoryItem.submenu = memory
+        menu.addItem(memoryItem)
         menu.addItem(item("Show System Ports (\(system.count))", on: showSystem) { app in
             app.showSystem.toggle()
             app.build()
@@ -142,7 +203,7 @@ final class PortBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         s.append(NSAttributedString(string: "\t\(project)", attributes: base.merging([.foregroundColor: NSColor.secondaryLabelColor]) { $1 }))
         if l.orphan { s.append(NSAttributedString(string: "  deleted", attributes: base.merging([.foregroundColor: NSColor.systemOrange]) { $1 })) }
         let idle = Activity.stoppable(l) ? activity.idle(l) ?? 0 : 0
-        let parts = [megabytes(l.memory), idle >= 3600 ? "idle \(span(idle))" : uptime(since: l.main.started),
+        let parts = [megabytes(l.memory), l.cpu.map { String(format: "%.0f%% CPU", $0) } ?? "", idle >= 3600 ? "idle \(span(idle))" : uptime(since: l.main.started),
                      l.owner == "Claude Code" ? "agent" : "", l.bind == "*" ? "LAN" : ""]
         let up = parts.filter { !$0.isEmpty }.joined(separator: "  ·  ")
         s.append(NSAttributedString(string: "\t\(up)", attributes: base.merging([
@@ -177,7 +238,7 @@ final class PortBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             m.addItem(label("PID \(l.procs.map { String($0.pid) }.joined(separator: ", "))  ·  \(l.main.name)"))
             if let cwd = l.cwd { m.addItem(label((cwd as NSString).abbreviatingWithTildeInPath + (l.orphan ? "  (deleted)" : ""))) }
         }
-        let who = [l.owner.map { "Started by \($0)" }, l.memory.map { megabytes($0) }].compactMap { $0 }.filter { !$0.isEmpty }
+        let who = [l.owner.map { "Started by \($0)" }, l.claim.map { "Claimed by \($0)" }, l.memory.map { megabytes($0) }].compactMap { $0 }.filter { !$0.isEmpty }
         if !who.isEmpty { m.addItem(label(who.joined(separator: "  ·  "))) }
         if Activity.stoppable(l), let idle = activity.idle(l) {
             m.addItem(label(idle < 60 ? "Active now  ·  up \(uptime(since: l.main.started))" : "Idle \(span(idle))  ·  up \(uptime(since: l.main.started))"))

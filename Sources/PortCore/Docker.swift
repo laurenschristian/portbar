@@ -33,6 +33,32 @@ public enum Docker {
         return run(docker, ["restart", c.id], timeout: 60) != nil
     }
 
+    /// Memory (bytes) and CPU percent per container id. Takes about 2 s because docker samples once.
+    public static func stats() -> [String: (memory: UInt64, cpu: Double)] {
+        guard let docker = binary,
+              let out = run(docker, ["stats", "--no-stream", "--format", "{{.ID}}\t{{.MemUsage}}\t{{.CPUPerc}}"], timeout: 10) else { return [:] }
+        return parseStats(out)
+    }
+
+    static func parseStats(_ out: String) -> [String: (memory: UInt64, cpu: Double)] {
+        var map: [String: (memory: UInt64, cpu: Double)] = [:]
+        for line in out.split(separator: "\n") {
+            let f = line.split(separator: "\t").map { $0.trimmingCharacters(in: .whitespaces) }
+            guard f.count >= 3, let used = f[1].components(separatedBy: " / ").first else { continue }
+            map[f[0]] = (bytes(used), Double(f[2].dropLast()) ?? 0)
+        }
+        return map
+    }
+
+    // "512.3MiB", "1.2GiB", "980kB"
+    static func bytes(_ s: String) -> UInt64 {
+        let units: [(String, Double)] = [("GiB", 1_073_741_824), ("MiB", 1_048_576), ("KiB", 1024), ("GB", 1e9), ("MB", 1e6), ("kB", 1e3), ("B", 1)]
+        for (unit, scale) in units where s.hasSuffix(unit) {
+            return UInt64((Double(s.dropLast(unit.count)) ?? 0) * scale)
+        }
+        return 0
+    }
+
     public static func parse(_ out: String) -> [UInt16: Container] {
         var map: [UInt16: Container] = [:]
         for line in out.split(separator: "\n") {

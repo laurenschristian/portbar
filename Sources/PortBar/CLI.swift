@@ -11,6 +11,8 @@ enum CLI {
            portbar kill <port>... [--force]
            portbar kill --all-dev [-y]             stop every dev server
            portbar kill --idle [-y]                stop orphans and servers idle past the threshold
+           portbar next-free [start] [--claim <label>]   print a free port, optionally reserving it
+           portbar mcp                             run the MCP server for coding agents
            portbar help
     """
 
@@ -19,8 +21,16 @@ enum CLI {
 
     static func run(_ argv: [String]) -> Int32 {
         let flags = Set(argv.filter { $0.hasPrefix("-") })
-        let words = argv.filter { !$0.hasPrefix("-") && $0 != "mem" }
+        let words = argv.enumerated().filter { i, a in !a.hasPrefix("-") && !(i > 0 && ["--sort", "--claim"].contains(argv[i - 1])) }.map(\.1)
         if flags.contains("-h") || flags.contains("--help") || words.first == "help" { print(usage); return 0 }
+        if words.first == "mcp" { return MCP.run() }
+        if words.first == "next-free" {
+            let start = words.dropFirst().first.flatMap { UInt16($0) } ?? 8000
+            let label = argv.firstIndex(of: "--claim").flatMap { argv.indices.contains($0 + 1) ? argv[$0 + 1] : nil }
+            guard let p = Ports.nextFree(from: start, claim: label, cwd: FileManager.default.currentDirectoryPath) else { return 1 }
+            print(p)
+            return 0
+        }
         let listeners = scan()
         let activity = Activity()
         func find(_ word: String?) -> (UInt16, Listener?)? {
@@ -72,7 +82,7 @@ enum CLI {
         case let word?:
             guard let (p, l) = find(word) else { fputs(usage + "\n", stderr); return 2 }
             guard let l else { fputs("nothing listening on :\(p)\n", stderr); return 1 }
-            if flags.contains("--json") { return json([l]) }
+            if flags.contains("--json") { print(encode([l])); return 0 }
             detail(l, activity)
             return 0
 
@@ -81,7 +91,7 @@ enum CLI {
             if let i = argv.firstIndex(of: "--sort"), argv.indices.contains(i + 1), argv[i + 1] == "mem" {
                 shown.sort { ($0.memory ?? 0) > ($1.memory ?? 0) }
             }
-            if flags.contains("--json") { return json(shown) }
+            if flags.contains("--json") { print(encode(shown)); return 0 }
             guard !shown.isEmpty else { print("no dev servers listening"); return 0 }
             print(style(pad("PORT", 6) + pad("STACK", 14) + pad("PROJECT", 40) + pad("OWNER", 12) + pad("PID", 7) + pad("UP", 5)
                         + pad("IDLE", 6) + pad("MEM", 9) + "BIND", "2"))
@@ -112,7 +122,8 @@ enum CLI {
     }
 
     static func scan() -> [Listener] {
-        Inventory.snapshot(containers: Inventory.needsDocker() ? Docker.containers() : [:]).listeners
+        let docker = Inventory.needsDocker()
+        return Inventory.snapshot(containers: docker ? Docker.containers() : [:]).listeners
     }
 
     static func row(_ l: Listener, _ activity: Activity) -> String {
@@ -136,11 +147,12 @@ enum CLI {
             ("stack", l.stack + (l.isSystem ? " (system)" : Activity.isService(l) ? " (service)" : "")),
             ("project", l.project.map { $0 + (l.orphan ? "  (folder deleted)" : "") }),
             ("owner", l.owner),
+            ("claimed by", l.claim),
             ("container", l.container.map { "\($0.name) (\($0.image), \($0.id))" }),
             ("pid", l.procs.map { String($0.pid) }.joined(separator: ", ")),
             ("up", uptime(since: l.main.started)),
             ("idle", idle(l, activity)),
-            ("memory", megabytes(l.memory)),
+            ("memory", megabytes(l.memory) + (l.cpu.map { String(format: "  ·  %.1f%% CPU", $0) } ?? "")),
             ("bind", l.addresses.joined(separator: ", ")),
             ("cwd", l.cwd),
             ("log", Launcher.laravelLog(cwd: l.cwd)),
@@ -149,19 +161,21 @@ enum CLI {
         for case let (k, v?) in fields where !v.isEmpty { print(style(pad(k, 11), "2") + v) }
     }
 
-    static func json(_ list: [Listener]) -> Int32 {
+    static func encode(_ list: [Listener]) -> String {
         struct Out: Encodable {
-            let port: UInt16, stack: String, project: String?, owner: String?, pids: [Int32], addresses: [String]
-            let system: Bool, service: Bool, orphan: Bool, memory: UInt64?, cwd: String?, command: String, started: Date?, container: Container?
+            let port: UInt16, stack: String, project: String?, owner: String?, claim: String?, pids: [Int32], addresses: [String]
+            let system: Bool, service: Bool, orphan: Bool, memory: UInt64?, cpu: Double?, idleSeconds: Int?
+            let cwd: String?, command: String, started: Date?, container: Container?
         }
-        let out = list.map { Out(port: $0.port, stack: $0.stack, project: $0.project, owner: $0.owner, pids: $0.procs.map(\.pid),
+        let activity = Activity()
+        let out = list.map { Out(port: $0.port, stack: $0.stack, project: $0.project, owner: $0.owner, claim: $0.claim, pids: $0.procs.map(\.pid),
                                  addresses: $0.addresses, system: $0.isSystem, service: Activity.isService($0), orphan: $0.orphan,
-                                 memory: $0.memory, cwd: $0.cwd, command: $0.main.command, started: $0.main.started, container: $0.container) }
+                                 memory: $0.memory, cpu: $0.cpu, idleSeconds: activity.idle($0).map { Int($0) },
+                                 cwd: $0.cwd, command: $0.main.command, started: $0.main.started, container: $0.container) }
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         enc.dateEncodingStrategy = .iso8601
-        print(String(decoding: (try? enc.encode(out)) ?? Data(), as: UTF8.self))
-        return 0
+        return String(decoding: (try? enc.encode(out)) ?? Data(), as: UTF8.self)
     }
 
     static func pad(_ s: String, _ n: Int) -> String { s.count >= n ? s + " " : s + String(repeating: " ", count: n - s.count) }

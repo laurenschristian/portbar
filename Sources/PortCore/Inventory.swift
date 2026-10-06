@@ -14,6 +14,10 @@ public struct Listener: Equatable {
     /// The working directory no longer exists, typically a removed git worktree.
     public var orphan = false
     public var memory: UInt64?
+    /// CPU percent, only known for Docker containers (from docker stats).
+    public var cpu: Double?
+    /// Label from a `portbar next-free --claim` reservation, usually the agent or worktree that asked.
+    public var claim: String?
 
     public var main: Proc { procs[0] }
     public var url: String { "http://localhost:\(port)" }
@@ -25,7 +29,8 @@ public struct Listener: Equatable {
 public enum Inventory {
     public static func scan(containers: [UInt16: Container] = [:]) -> [Listener] { snapshot(containers: containers).listeners }
 
-    public static func snapshot(containers: [UInt16: Container] = [:]) -> (listeners: [Listener], active: Set<UInt16>) {
+    public static func snapshot(containers: [UInt16: Container] = [:],
+                                stats: [String: (memory: UInt64, cpu: Double)] = [:]) -> (listeners: [Listener], active: Set<UInt16>) {
         let (sockets, active) = Scanner.scan()
         var procs: [pid_t: Proc] = [:]
         for pid in Set(sockets.map(\.pid)) { procs[pid] = Scanner.proc(pid) }
@@ -33,7 +38,15 @@ public enum Inventory {
         let parents = Scanner.parents()
         var children: [pid_t: [pid_t]] = [:]
         for (pid, ppid) in parents { children[ppid, default: []].append(pid) }
-        for i in listeners.indices where listeners[i].container == nil {
+        let claims = Dictionary(Ports.claims(listening: Set(sockets.map(\.port))).map { ($0.port, $0.label) }) { a, _ in a }
+        for i in listeners.indices {
+            listeners[i].claim = claims[listeners[i].port]
+            if let c = listeners[i].container {
+                let st = stats[c.id]
+                listeners[i].memory = st?.memory
+                listeners[i].cpu = st?.cpu
+                continue
+            }
             listeners[i].owner = owner(of: listeners[i].main.ppid)
             // Count the whole tree: Vite's esbuild and php -S workers live in child processes.
             var seen = Set<pid_t>(), queue = listeners[i].procs.map(\.pid)

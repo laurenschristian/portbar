@@ -29,7 +29,7 @@ It is plain AppKit with no dependencies, no analytics and no network access.
 - Stack detection from the process arguments: Vite, Astro, Nuxt, Django, Rails, Flask, Bun and 30 more, each with its brand icon
 - Project names from the git checkout, including worktrees (`my-app · fix-login`)
 - Who started each server: Claude Code, Codex, Ghostty, iTerm, VS Code, Cursor
-- Memory per server, counted over the whole process tree (Vite's esbuild, php -S workers)
+- Memory per server, counted over the whole process tree (Vite's esbuild, worker processes)
 - Docker ports map to the container and compose project, with memory and CPU from `docker stats`
 - `LAN` marks servers that listen on all interfaces
 
@@ -37,13 +37,13 @@ It is plain AppKit with no dependencies, no analytics and no network access.
 - Idle auto-stop: a dev server with no connections and no CPU use for 8 hours (or 24 h, 3 days, off) is stopped, with a notification
 - Orphans: when you delete a folder or remove a git worktree, its servers stop within a second
 - Memory alerts when one dev server passes 2, 3, 4 or 8 GB
-- Postgres, Redis, MySQL, PHP-FPM and Docker containers are pinned in a Services section and never auto-stopped
+- Postgres, Redis, MySQL and Docker containers are pinned in a Services section and never auto-stopped
 - System listeners (Control Center, AirPlay, app helpers) are hidden and protected
 
 **Act on it**
-- Kill sends SIGTERM, then SIGKILL after 3 seconds. A `php artisan serve` parent is stopped too, so it does not respawn
+- Kill sends SIGTERM, then SIGKILL after 3 seconds. A supervising parent process is stopped too, so it does not respawn
 - Restart reruns the same command in the same folder and environment, logging to `~/Library/Logs/PortBar/<port>.log`
-- Open the URL, reveal the folder, copy the command, open the project's Laravel log
+- Open the URL, reveal the folder, copy the command, open the project's log file
 - ⌃⌥P opens the menu from anywhere
 
 **For coding agents**
@@ -98,7 +98,7 @@ The icon shows how many dev servers run. Click it, or press ⌃⌥P.
 | --- | --- |
 | Dev servers | Port, stack, project, memory, uptime or idle time, `agent` and `LAN` tags |
 | Services | Postgres, Redis, Docker containers and other always-on services |
-| Row submenu | Open, Copy URL, Reveal Folder, Laravel log, details, Restart, Kill |
+| Row submenu | Open, Copy URL, Reveal Folder, log file, details, Restart, Kill |
 | Footer | Stop All Dev Servers, Stop Idle Servers, Auto-Stop and Memory Alert thresholds, Show System Ports, Launch at Login |
 
 ### Command line
@@ -106,9 +106,9 @@ The icon shows how many dev servers run. Click it, or press ⌃⌥P.
 ```
 $ portbar
 PORT  STACK         PROJECT                         OWNER        PID    UP   IDLE  MEM     BIND
-3210  Next.js       docs-site · main                Claude Code  23218  9m   now   3.9 GB  *
+4321  Astro         docs-site · main                Claude Code  23218  9m   now   3.9 GB  *
 5173  Vite          my-app · dev                    Ghostty      5370   2h   now   412 MB  local
-8000  Laravel       my-app · dev                    Ghostty      5402   2h   40m   96 MB   local
+8000  Django        my-app · dev                    Ghostty      5402   2h   40m   96 MB   local
 5432  Postgres                                                   1295   34d  keep  964 MB  local
 5433  Docker        api · db-1                                   89594  5d   keep  512 MB  *
 ```
